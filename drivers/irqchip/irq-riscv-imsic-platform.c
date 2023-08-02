@@ -14,6 +14,7 @@
 #include <linux/irqdomain.h>
 #include <linux/module.h>
 #include <linux/msi.h>
+#include <linux/pci.h>
 #include <linux/platform_device.h>
 #include <linux/spinlock.h>
 #include <linux/smp.h>
@@ -215,6 +216,22 @@ static const struct irq_domain_ops imsic_base_domain_ops = {
 #endif
 };
 
+#ifdef CONFIG_RISCV_IMSIC_PCI
+
+static void imsic_pci_mask_irq(struct irq_data *d)
+{
+	pci_msi_mask_irq(d);
+	irq_chip_mask_parent(d);
+}
+
+static void imsic_pci_unmask_irq(struct irq_data *d)
+{
+	pci_msi_unmask_irq(d);
+	irq_chip_unmask_parent(d);
+}
+
+#endif
+
 static struct irq_chip imsic_plat_irq_chip = {
 	.name			= "IMSIC-PLAT",
 #ifdef CONFIG_SMP
@@ -240,6 +257,7 @@ static bool imsic_init_dev_msi_info(struct device *dev,
 
 	/* MSI parent domain specific settings */
 	switch (real_parent->bus_token) {
+	case DOMAIN_BUS_PCI_MSI:
 	case DOMAIN_BUS_NEXUS:
 		if (WARN_ON_ONCE(domain != real_parent))
 			return false;
@@ -254,6 +272,13 @@ static bool imsic_init_dev_msi_info(struct device *dev,
 
 	/* Is the target supported? */
 	switch (info->bus_token) {
+#ifdef CONFIG_RISCV_IMSIC_PCI
+	case DOMAIN_BUS_PCI_DEVICE_MSI:
+	case DOMAIN_BUS_PCI_DEVICE_MSIX:
+		info->chip->irq_mask = imsic_pci_mask_irq;
+		info->chip->irq_unmask = imsic_pci_unmask_irq;
+		break;
+#endif
 	default:
 		WARN_ON_ONCE(1);
 		return false;
@@ -276,7 +301,8 @@ static bool imsic_init_dev_msi_info(struct device *dev,
 }
 
 static const struct msi_parent_ops imsic_msi_parent_ops = {
-	.supported_flags	= MSI_GENERIC_FLAGS_MASK,
+	.supported_flags	= MSI_GENERIC_FLAGS_MASK |
+				  MSI_FLAG_PCI_MSIX,
 	.init_dev_msi_info	= imsic_init_dev_msi_info,
 };
 
@@ -293,7 +319,14 @@ static int imsic_irq_domains_init(struct fwnode_handle *fwnode)
 	imsic->base_domain->flags |= IRQ_DOMAIN_FLAG_MSI_PARENT;
 	imsic->base_domain->msi_parent_ops = &imsic_msi_parent_ops;
 
-	irq_domain_update_bus_token(imsic->base_domain, DOMAIN_BUS_NEXUS);
+	/*
+	 * Use DOMAIN_BUS_PCI_MSI as bus token so that PCI subsystem can
+	 * discover the MSI domain for PCI devices. This also works for
+	 * platform devices because the MSI domain for platform devices
+	 * is either set explicitly at device creation time or discovered
+	 * through DT bindings.
+	 */
+	irq_domain_update_bus_token(imsic->base_domain, DOMAIN_BUS_PCI_MSI);
 
 	/* Create Platform MSI domain */
 	imsic->plat_domain = platform_msi_create_irq_domain(fwnode,
